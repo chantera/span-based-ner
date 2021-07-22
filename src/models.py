@@ -17,7 +17,7 @@ def build_model(**kwargs) -> "SpanClassifier":
         char_embeddings,
         char_feature_size=kwargs.get("char_feature_size", 50),
         char_kernel_sizes=kwargs.get("char_kernel_sizes", [3, 4, 5]),
-        n_layers=kwargs.get("n_lstm_layers", 3),
+        num_layers=kwargs.get("num_lstm_layers", 3),
         hidden_size=kwargs.get("lstm_hidden_size", 200),
         embedding_dropout=kwargs.get("embedding_dropout", 0.5),
         lstm_dropout=kwargs.get("lstm_dropout", 0.4),
@@ -26,7 +26,7 @@ def build_model(**kwargs) -> "SpanClassifier":
         encoder.freeze_embedding()
     scorer = BaselineSpanScorer(
         encoder.out_size,
-        n_labels=kwargs.get("num_labels", 0) + SpanClassifier.n_additional_labels,
+        num_labels=kwargs.get("num_labels", 0) + SpanClassifier.num_additional_labels,
         mlp_units=kwargs.get("mlp_units", 150),
         mlp_dropout=kwargs.get("mlp_dropout", 0.2),
         feature="concat",
@@ -47,7 +47,7 @@ def get_all_spans(n: int) -> torch.Tensor:
 
 
 class SpanClassifier(nn.Module):
-    n_additional_labels = 1
+    num_additional_labels = 1
 
     def __init__(self, encoder: "Encoder", scorer: "SpanScorer"):
         super().__init__()
@@ -68,7 +68,7 @@ class SpanClassifier(nn.Module):
         spans: Sequence[torch.Tensor],
         scores: Sequence[torch.Tensor],
     ) -> List[List[Tuple[int, int, int]]]:
-        n_labels = self.scorer.n_labels
+        num_labels = self.scorer.num_labels
         mentions = []
         for spans_i, scores_i in zip(spans, scores):
             assert len(spans_i) == len(scores_i)
@@ -76,7 +76,7 @@ class SpanClassifier(nn.Module):
             mentions_i = [
                 (s[0], s[1], label)
                 for s, label in zip(spans_i.tolist(), labels_i.tolist())
-                if label < n_labels - 1
+                if label < num_labels - 1
             ]
             mentions.append(mentions_i)
         return mentions
@@ -89,12 +89,12 @@ class SpanClassifier(nn.Module):
         decode=True,
     ) -> Dict[str, Any]:
         assert len(spans) == len(scores) == len(true_mentions)
-        n_labels = self.scorer.n_labels
+        num_labels = self.scorer.num_labels
         true_labels = []
         for spans_i, scores_i, true_mentions_i in zip(spans, scores, true_mentions):
             assert len(spans_i) == len(scores_i)
             span2idx = {(s[0].item(), s[1].item()): idx for idx, s in enumerate(spans_i)}
-            labels_i = torch.full((len(spans_i),), fill_value=n_labels - 1)
+            labels_i = torch.full((len(spans_i),), fill_value=num_labels - 1)
             for (start, end, label) in true_mentions_i:
                 idx = span2idx.get((start, end))
                 if idx is not None:
@@ -141,9 +141,9 @@ def categorical_accuracy(
 
 
 class SpanScorer(torch.nn.Module):
-    def __init__(self, n_labels: int):
+    def __init__(self, num_labels: int):
         super().__init__()
-        self.n_labels = n_labels
+        self.num_labels = num_labels
 
     def forward(
         self, xs: torch.Tensor, spans: Sequence[torch.Tensor]
@@ -155,14 +155,14 @@ class BaselineSpanScorer(SpanScorer):
     def __init__(
         self,
         input_size: int,
-        n_labels: int,
+        num_labels: int,
         mlp_units: Union[int, Sequence[int]] = 150,
         mlp_dropout: float = 0.0,
         feature="concat",
     ):
-        super().__init__(n_labels)
+        super().__init__(num_labels)
         input_size *= 2 if feature == "concat" else 1
-        self.mlp = MLP(input_size, n_labels, mlp_units, F.relu, mlp_dropout)
+        self.mlp = MLP(input_size, num_labels, mlp_units, F.relu, mlp_dropout)
         self.feature = feature
 
     def forward(
@@ -204,7 +204,7 @@ class BiLSTMEncoder(Encoder):
         char_embeddings: Union[torch.Tensor, Tuple[int, int]],
         char_feature_size: int = 50,
         char_kernel_sizes: Union[Sequence[int], int] = 3,
-        n_layers: int = 3,
+        num_layers: int = 3,
         hidden_size: Optional[int] = None,
         embedding_dropout: float = 0.0,
         lstm_dropout: float = 0.0,
@@ -223,7 +223,7 @@ class BiLSTMEncoder(Encoder):
         self.bilstm = nn.LSTM(
             lstm_in_size,
             hidden_size,
-            n_layers,
+            num_layers,
             batch_first=True,
             bidirectional=True,
             dropout=lstm_dropout,
