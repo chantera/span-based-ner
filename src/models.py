@@ -68,18 +68,20 @@ class SpanClassifier(nn.Module):
         spans: Sequence[torch.Tensor],
         scores: Sequence[torch.Tensor],
     ) -> List[List[Tuple[int, int, int]]]:
-        num_labels = self.scorer.num_labels
-        mentions = []
-        for spans_i, scores_i in zip(spans, scores):
-            assert len(spans_i) == len(scores_i)
-            labels_i = scores_i.argmax(dim=1)
-            mentions_i = [
-                (s[0], s[1], label)
-                for s, label in zip(spans_i.tolist(), labels_i.tolist())
-                if label < num_labels - 1
-            ]
-            mentions.append(mentions_i)
-        return mentions
+        spans_flatten = torch.cat(spans)
+        scores_flatten = torch.cat(scores)
+        assert len(spans_flatten) == len(scores_flatten)
+        labels_flatten = scores_flatten.argmax(dim=1).cpu()
+        mask = labels_flatten < self.scorer.num_labels - 1
+        mentions = torch.hstack((spans_flatten[mask], labels_flatten[mask, None]))
+
+        output = []
+        offset = 0
+        sizes = [m.sum() for m in torch.split(mask, [len(idxs) for idxs in spans])]
+        for size in sizes:
+            output.append([tuple(m) for m in mentions[offset : offset + size].tolist()])
+            offset += size
+        return output  # type: ignore
 
     def compute_metrics(
         self,
@@ -93,7 +95,7 @@ class SpanClassifier(nn.Module):
         true_labels = []
         for spans_i, scores_i, true_mentions_i in zip(spans, scores, true_mentions):
             assert len(spans_i) == len(scores_i)
-            span2idx = {(s[0].item(), s[1].item()): idx for idx, s in enumerate(spans_i)}
+            span2idx = {tuple(s): idx for idx, s in enumerate(spans_i.tolist())}
             labels_i = torch.full((len(spans_i),), fill_value=num_labels - 1)
             for (start, end, label) in true_mentions_i:
                 idx = span2idx.get((start, end))
@@ -351,11 +353,10 @@ class CharCNN(nn.Module):
     @staticmethod
     def _foward_conv(conv, xs, lengths):
         # NOTE: padding is applied to words whose length is less than `kernel_size`.
-        n, max_length = xs.shape[:2]
-        kernel_size = conv.kernel_size[0]
-        mask = torch.ones((n, max_length - kernel_size + 1), dtype=torch.bool)
-        for i, length in enumerate(lengths):
-            mask[i, : max(length - kernel_size + 1, 1)] = 0
+        with torch.no_grad():
+            kernel_size = conv.kernel_size[0]
+            out_sizes = torch.clamp(lengths - kernel_size + 1, min=1)
+            mask = torch.arange(xs.size(1) - kernel_size + 1)[None] >= out_sizes[:, None]
         hs = F.relu(conv(xs.transpose(1, 2)).transpose(1, 2))
         hs.masked_fill_(mask.to(hs.device)[..., None], -float("inf"))
         ys = torch.max(hs, dim=1)[0]
