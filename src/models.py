@@ -1,4 +1,5 @@
 from functools import lru_cache
+from itertools import chain
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -8,12 +9,14 @@ import torch.nn.functional as F
 
 def build_model(**kwargs) -> "SpanClassifier":
     word_embeddings = (kwargs.get("word_vocab_size", 1), kwargs.get("word_embed_size", 100))
-    char_embeddings = (kwargs.get("char_vocab_size", 1), kwargs.get("char_embed_size", 100))
+    char_embeddings = (kwargs.get("char_vocab_size", 1), kwargs.get("char_embed_size", 50))
     if kwargs.get("word_embeddings") is not None:
         word_embeddings = kwargs["word_embeddings"]
     encoder = BiLSTMEncoder(
         word_embeddings,
         char_embeddings,
+        char_feature_size=kwargs.get("char_feature_size", 50),
+        char_kernel_sizes=kwargs.get("char_kernel_sizes", [3, 4, 5]),
         n_layers=kwargs.get("n_lstm_layers", 3),
         hidden_size=kwargs.get("lstm_hidden_size", 200),
         embedding_dropout=kwargs.get("embedding_dropout", 0.5),
@@ -197,6 +200,8 @@ class BiLSTMEncoder(Encoder):
         self,
         word_embeddings: Union[torch.Tensor, Tuple[int, int]],
         char_embeddings: Union[torch.Tensor, Tuple[int, int]],
+        char_feature_size: int = 50,
+        char_kernel_sizes: Union[Sequence[int], int] = 3,
         n_layers: int = 3,
         hidden_size: Optional[int] = None,
         embedding_dropout: float = 0.0,
@@ -208,9 +213,9 @@ class BiLSTMEncoder(Encoder):
             self.word_emb = nn.Embedding(size, dim)
         else:
             self.word_emb = nn.Embedding.from_pretrained(word_embeddings, freeze=False)
-        # TODO: implement CharCNN
+        self.char_cnn = CharCNN(char_embeddings, char_feature_size, char_kernel_sizes)
 
-        lstm_in_size = self.word_emb.weight.size(1)
+        lstm_in_size = self.word_emb.weight.size(1) + self.char_cnn.out_size
         if hidden_size is None:
             hidden_size = lstm_in_size
         self.bilstm = nn.LSTM(
@@ -232,8 +237,9 @@ class BiLSTMEncoder(Encoder):
         self, word_ids: Sequence[torch.Tensor], char_ids: Sequence[Sequence[torch.Tensor]]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         lengths = torch.tensor([x.size(0) for x in word_ids])
-        xs = self.word_emb(torch.cat(word_ids, dim=0))
-        xs = self.embedding_dropout(xs)
+        xs_word = self.word_emb(torch.cat(word_ids, dim=0))
+        xs_char = self.char_cnn(list(chain.from_iterable(char_ids)))
+        xs = self.embedding_dropout(torch.cat((xs_word, xs_char), dim=1))
 
         if torch.all(lengths == lengths[0]):
             hs, _ = self.bilstm(xs.view(len(lengths), lengths[0], -1))
@@ -299,3 +305,56 @@ class MLP(nn.Sequential):
 
         def __repr__(self):
             return "{}.{}({})".format(MLP.__name__, self._get_name(), self.extra_repr())
+
+
+class CharCNN(nn.Module):
+    def __init__(
+        self,
+        embeddings: Union[torch.Tensor, Tuple[int, int]],
+        feature_size: int,
+        kernel_sizes: Union[Sequence[int], int],
+        dropout=0.0,
+        bias=True,
+    ):
+        super().__init__()
+        if isinstance(embeddings, tuple):
+            size, dim = embeddings
+            self.emb = nn.Embedding(size + 1, dim, padding_idx=-1)
+        else:
+            embeddings = torch.vstack((embeddings, torch.zeros_like(embeddings[0])))
+            self.emb = nn.Embedding.from_pretrained(embeddings, freeze=False, padding_idx=-1)
+        self.dropout = nn.Dropout(dropout)
+        self.convs = nn.ModuleList()
+        in_size = self.emb.weight.size(1)
+        if isinstance(kernel_sizes, int):
+            kernel_sizes = [kernel_sizes]
+        for k in kernel_sizes:
+            self.convs.append(nn.Conv1d(in_size, feature_size, k, stride=1, padding=0, bias=bias))
+        self.out_size = feature_size * len(kernel_sizes)
+
+    def forward(self, char_ids: Sequence[torch.Tensor]) -> torch.Tensor:
+        lengths = torch.tensor([ids.size(0) for ids in char_ids])
+        input_ids = nn.utils.rnn.pad_sequence(
+            char_ids, batch_first=True, padding_value=self.emb.padding_idx
+        )
+        max_kernel_size = max([c.kernel_size[0] for c in self.convs])
+        if input_ids.size(1) < max_kernel_size:
+            pad_shape = (input_ids.size(0), max_kernel_size - input_ids.size(1))
+            pads = torch.full(pad_shape, self.emb.padding_idx, device=input_ids.device)
+            input_ids = torch.hstack((input_ids, pads))
+        xs = self.dropout(self.emb(input_ids))
+        ys = [self._foward_conv(c, xs, lengths) for c in self.convs]
+        return torch.cat(ys, dim=1)
+
+    @staticmethod
+    def _foward_conv(conv, xs, lengths):
+        # NOTE: padding is applied to words whose length is less than `kernel_size`.
+        n, max_length = xs.shape[:2]
+        kernel_size = conv.kernel_size[0]
+        mask = torch.ones((n, max_length - kernel_size + 1), dtype=torch.bool)
+        for i, length in enumerate(lengths):
+            mask[i, : max(length - kernel_size + 1, 1)] = 0
+        hs = F.relu(conv(xs.transpose(1, 2)).transpose(1, 2))
+        hs.masked_fill_(mask.to(hs.device)[..., None], -float("inf"))
+        ys = torch.max(hs, dim=1)[0]
+        return ys
