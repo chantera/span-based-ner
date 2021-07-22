@@ -111,8 +111,8 @@ class SpanClassifier(nn.Module):
                 tp += len(gold & pred)
                 fn += len(gold - pred)
                 fp += len(pred - gold)
-            result["precision"] = (tp, tp + fn)
-            result["recall"] = (tp, tp + fp)
+            result["precision"] = (tp, tp + fp)
+            result["recall"] = (tp, tp + fn)
             result["mentions"] = pred_mentions
 
         return result
@@ -151,15 +151,13 @@ class BaselineSpanScorer(SpanScorer):
         self,
         input_size: int,
         n_labels: int,
-        mlp_units: Union[Sequence[int], int] = 150,
+        mlp_units: Union[int, Sequence[int]] = 150,
         mlp_dropout: float = 0.0,
         feature="concat",
     ):
         super().__init__(n_labels)
-        mlp_units = [mlp_units] if isinstance(mlp_units, int) else list(mlp_units)
-        mlp_units.append(n_labels + 1)
         input_size *= 2 if feature == "concat" else 1
-        self.mlp = MLP(input_size, mlp_units, F.relu, mlp_dropout)
+        self.mlp = MLP(input_size, n_labels + 1, mlp_units, F.relu, mlp_dropout)
         self.feature = feature
 
     def forward(
@@ -228,7 +226,7 @@ class BiLSTMEncoder(Encoder):
         self._hidden_size = hidden_size
 
     def freeze_embedding(self) -> None:
-        self.word_embed.weight.requires_grad = False
+        self.word_emb.weight.requires_grad = False
 
     def forward(
         self, word_ids: Sequence[torch.Tensor], char_ids: Sequence[Sequence[torch.Tensor]]
@@ -255,21 +253,21 @@ class MLP(nn.Sequential):
     def __init__(
         self,
         in_features: int,
-        units: Sequence[int],
+        out_features: Optional[int],
+        units: Optional[Union[int, Sequence[int]]] = None,
         activate: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         dropout: float = 0.0,
         bias: bool = True,
     ):
-        layers = (
-            self.Layer(
-                units[i - 1] if i > 0 else in_features,
-                u,
-                activate if i < len(units) - 1 else None,
-                dropout,
-                bias,
-            )
-            for i, u in enumerate(units)
-        )
+        units = [units] if isinstance(units, int) else units
+        if not units and out_features is None:
+            raise ValueError("'out_features' or 'units' must be specified")
+        layers = []
+        for u in units or []:
+            layers.append(MLP.Layer(in_features, u, activate, dropout, bias))
+            in_features = u
+        if out_features is not None:
+            layers.append(MLP.Layer(in_features, out_features, None, 0.0, bias))
         super().__init__(*layers)
 
     class Layer(nn.Module):
