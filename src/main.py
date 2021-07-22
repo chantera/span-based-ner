@@ -1,4 +1,5 @@
 import logging
+import os
 
 import torch
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -6,7 +7,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 import utils
 from data import Preprocessor, create_dataloader
 from models import build_model
-from training import create_trainer
+from training import EvaluateCallback, create_trainer
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())
@@ -70,8 +71,9 @@ def train(args):
 
     model = build_model(
         word_vocab_size=len(preprocessor.vocabs["word"]),
-        char_vocab_size=len(preprocessor.vocabs["char"]),
+        word_embed_size=preprocessor.word_embeddings_dim or 100,
         word_embeddings=preprocessor.word_embeddings,
+        char_vocab_size=len(preprocessor.vocabs["char"]),
         num_labels=len(preprocessor.vocabs["label"]),
     )
     model.to(device)
@@ -80,9 +82,11 @@ def train(args):
         model, lr=args.learning_rate, epochs=args.epochs, eval_interval=args.eval_interval
     )
     trainer.add_callback(utils.training.PrintCallback(printer=logger.info))
-    if eval_dataloader:
-        # TODO: evaluate and save
-        pass
+    if eval_dataloader and args.save_dir:
+        torch.save(preprocessor, os.path.join(args.save_dir, "preprocessor.pt"))
+        trainer.add_callback(
+            utils.training.SaveCallback(args.save_dir, monitor="eval/f1", mode="max")
+        )
     with logging_redirect_tqdm(loggers=[logger]):
         trainer.fit(train_dataloader, eval_dataloader)
 
@@ -101,6 +105,7 @@ def evaluate(args):
     checkpoint = torch.load(args.checkpoint_file)
     model = build_model(
         word_vocab_size=len(preprocessor.vocabs["word"]),
+        word_embed_size=preprocessor.word_embeddings_dim or 100,
         char_vocab_size=len(preprocessor.vocabs["char"]),
         num_labels=len(preprocessor.vocabs["label"]),
     )
@@ -109,7 +114,8 @@ def evaluate(args):
 
     trainer = create_trainer(model)
     trainer.add_callback(utils.training.PrintCallback(printer=logger.info))
-    # TODO: add callback for evaluation
+    label_map = {v: k for k, v in preprocessor.vocabs["label"].mapping.items()}
+    trainer.add_callback(EvaluateCallback(args.eval_file, label_map, args.verbose))
     with logging_redirect_tqdm(loggers=[logger]):
         trainer.evaluate(eval_dataloader)
 

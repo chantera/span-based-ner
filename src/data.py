@@ -25,6 +25,7 @@ class Preprocessor:
     def __init__(self):
         self.vocabs: Dict[str, utils.data.Vocab] = {}
         self._embeddings: Optional[torch.Tensor] = None
+        self._embed_size: Optional[int] = None
         self._embed_file: Optional[Union[str, bytes, os.PathLike]] = None
 
     def build_vocab(
@@ -72,6 +73,7 @@ class Preprocessor:
         self.vocabs["word"] = utils.data.Vocab.fromkeys(vocab, unknown)
         self.vocabs["word"].preprocess = preprocess
         self._embeddings = embeddings
+        self._embed_size = embeddings.size(1)
         self._embed_file = file
 
     @staticmethod
@@ -115,6 +117,10 @@ class Preprocessor:
             self.load_embeddings(self._embed_file, v.lookup(v.unknown_id), v.preprocess)
             assert len(self.vocabs["word"]) == len(v)
         return self._embeddings
+
+    @property
+    def word_embeddings_dim(self) -> Optional[int]:
+        return self._embed_size
 
 
 def _wrap_cache(load_fn, file, cache_dir=None, suffix=".cache"):
