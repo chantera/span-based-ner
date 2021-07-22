@@ -26,7 +26,7 @@ def build_model(**kwargs) -> "SpanClassifier":
         encoder.freeze_embedding()
     scorer = BaselineSpanScorer(
         encoder.out_size,
-        n_labels=kwargs.get("num_labels", 0),
+        n_labels=kwargs.get("num_labels", 0) + SpanClassifier.n_additional_labels,
         mlp_units=kwargs.get("mlp_units", 150),
         mlp_dropout=kwargs.get("mlp_dropout", 0.2),
         feature="concat",
@@ -47,6 +47,8 @@ def get_all_spans(n: int) -> torch.Tensor:
 
 
 class SpanClassifier(nn.Module):
+    n_additional_labels = 1
+
     def __init__(self, encoder: "Encoder", scorer: "SpanScorer"):
         super().__init__()
         self.encoder = encoder
@@ -160,7 +162,7 @@ class BaselineSpanScorer(SpanScorer):
     ):
         super().__init__(n_labels)
         input_size *= 2 if feature == "concat" else 1
-        self.mlp = MLP(input_size, n_labels + 1, mlp_units, F.relu, mlp_dropout)
+        self.mlp = MLP(input_size, n_labels, mlp_units, F.relu, mlp_dropout)
         self.feature = feature
 
     def forward(
